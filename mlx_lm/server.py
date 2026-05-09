@@ -30,7 +30,7 @@ from typing import (
 )
 
 import mlx.core as mx
-from huggingface_hub import scan_cache_dir
+from huggingface_hub import CacheNotFound, scan_cache_dir
 
 from ._version import __version__
 from .generate import (
@@ -315,6 +315,12 @@ class ModelProvider:
         self._model_map["default_model"] = self.cli_args.model
         self._adapter_map["default_model"] = self.cli_args.adapter_path
         self._draft_model_map["default_model"] = self.cli_args.draft_model
+        if self.cli_args.served_model_name and self.cli_args.model:
+            self._model_map[self.cli_args.served_model_name] = self.cli_args.model
+            self._adapter_map[self.cli_args.served_model_name] = self.cli_args.adapter_path
+            self._draft_model_map[self.cli_args.served_model_name] = (
+                self.cli_args.draft_model
+            )
 
         # Build the tokenizer config for later use in load
         self._tokenizer_config = {
@@ -1094,6 +1100,20 @@ class APIHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self._set_cors_headers()
 
+    def _public_model_name(self):
+        served_model_name = self.response_generator.cli_args.served_model_name
+        if not served_model_name:
+            return self.requested_model
+
+        configured_model = self.response_generator.cli_args.model
+        model_names = {"default_model", served_model_name, configured_model}
+        if configured_model:
+            model_path = Path(configured_model)
+            if model_path.exists():
+                model_names.add(str(model_path.resolve()))
+
+        return served_model_name if self.requested_model in model_names else self.requested_model
+
     def do_OPTIONS(self):
         self._set_completion_headers(204)
         self.end_headers()
@@ -1304,7 +1324,7 @@ class APIHandler(BaseHTTPRequestHandler):
             "id": self.request_id,
             "system_fingerprint": self.system_fingerprint,
             "object": self.object_type,
-            "model": self.requested_model,
+            "model": self._public_model_name(),
             "created": self.created,
             "choices": [
                 {
@@ -1561,7 +1581,7 @@ class APIHandler(BaseHTTPRequestHandler):
             "id": self.request_id,
             "system_fingerprint": self.system_fingerprint,
             "object": "chat.completion",
-            "model": self.requested_model,
+            "model": self._public_model_name(),
             "created": self.created,
             "choices": [],
             "usage": {
@@ -1644,9 +1664,6 @@ class APIHandler(BaseHTTPRequestHandler):
         """
         Handle a GET request for the /v1/models endpoint.
         """
-        self._set_completion_headers(200)
-        self.end_headers()
-
         files = ["config.json", "model.safetensors.index.json", "tokenizer_config.json"]
 
         parts = self.path.split("/")
@@ -1664,11 +1681,16 @@ class APIHandler(BaseHTTPRequestHandler):
             file_names = {f.file_path.name for f in repo.refs["main"].files}
             return all(f in file_names for f in files)
 
-        # Scan the cache directory for downloaded mlx models
-        hf_cache_info = scan_cache_dir()
-        downloaded_models = [
-            repo for repo in hf_cache_info.repos if probably_mlx_lm(repo)
-        ]
+        # Scan the cache directory for downloaded mlx models. A server can also
+        # be launched from a local or non-HF cache path, so missing HF cache is
+        # not an error for an OpenAI-compatible models list.
+        try:
+            hf_cache_info = scan_cache_dir()
+            downloaded_models = [
+                repo for repo in hf_cache_info.repos if probably_mlx_lm(repo)
+            ]
+        except CacheNotFound:
+            downloaded_models = []
 
         # Create a list of available models
         models = [
@@ -1683,7 +1705,10 @@ class APIHandler(BaseHTTPRequestHandler):
         if self.response_generator.cli_args.model:
             model_path = Path(self.response_generator.cli_args.model)
             if model_path.exists():
-                model_id = str(model_path.resolve())
+                model_id = (
+                    self.response_generator.cli_args.served_model_name
+                    or str(model_path.resolve())
+                )
                 models.append(
                     {
                         "id": model_id,
@@ -1695,6 +1720,9 @@ class APIHandler(BaseHTTPRequestHandler):
         response = {"object": "list", "data": models}
 
         response_json = json.dumps(response).encode()
+        self._set_completion_headers(200)
+        self.send_header("Content-Length", str(len(response_json)))
+        self.end_headers()
         self.wfile.write(response_json)
         self.wfile.flush()
 
@@ -1754,6 +1782,15 @@ def main():
         "--model",
         type=str,
         help="The path to the MLX model weights, tokenizer, and config",
+    )
+    parser.add_argument(
+        "--served-model-name",
+        type=str,
+        default=None,
+        help=(
+            "Optional public model name to expose in OpenAI-compatible responses "
+            "and /v1/models while loading weights from --model."
+        ),
     )
     parser.add_argument(
         "--adapter-path",
