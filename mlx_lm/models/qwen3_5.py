@@ -221,7 +221,10 @@ class DecoderLayer(nn.Module):
         )
 
         if args.num_experts > 0:
-            self.mlp = SparseMoeBlock(args)
+            self.mlp = SparseMoeBlock(
+                args,
+                offload_prefix=f"language_model.model.layers.{layer_idx}.mlp.switch_mlp",
+            )
         else:
             self.mlp = MLP(args.hidden_size, args.intermediate_size)
 

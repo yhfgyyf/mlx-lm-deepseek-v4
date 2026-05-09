@@ -19,6 +19,7 @@ from .base import (
 )
 from .cache import ArraysCache, KVCache
 from .gated_delta import gated_delta_update
+from .moe_disk_offload import DiskBackedSwitchGLU, get_moe_expert_store
 from .rope_utils import initialize_rope
 from .switch_layers import SwitchGLU
 
@@ -306,7 +307,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, offload_prefix: Optional[str] = None):
         super().__init__()
         dim = args.hidden_size
         intermediate_size = args.moe_intermediate_size
@@ -317,7 +318,15 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.top_k = args.num_experts_per_tok
 
         self.gate = nn.Linear(dim, num_experts, bias=False)
-        self.switch_mlp = SwitchGLU(dim, intermediate_size, num_experts)
+        store = get_moe_expert_store()
+        if store is not None and offload_prefix and store.has_tensor(
+            f"{offload_prefix}.up_proj.weight"
+        ):
+            self.switch_mlp = DiskBackedSwitchGLU(
+                dim, intermediate_size, num_experts, offload_prefix, store=store
+            )
+        else:
+            self.switch_mlp = SwitchGLU(dim, intermediate_size, num_experts)
 
         self.shared_expert = Qwen3NextMLP(dim, shared_expert_intermediate_size)
         self.shared_expert_gate = nn.Linear(dim, 1, bias=False)
@@ -370,7 +379,9 @@ class Qwen3NextDecoderLayer(nn.Module):
         if (layer_idx not in args.mlp_only_layers) and (
             args.num_experts > 0 and (layer_idx + 1) % args.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen3NextSparseMoeBlock(args)
+            self.mlp = Qwen3NextSparseMoeBlock(
+                args, offload_prefix=f"model.layers.{layer_idx}.mlp.switch_mlp"
+            )
         else:
             self.mlp = Qwen3NextMLP(args.hidden_size, args.intermediate_size)
 

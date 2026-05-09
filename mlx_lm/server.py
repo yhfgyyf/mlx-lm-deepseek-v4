@@ -356,6 +356,11 @@ class ModelProvider:
                 model_path,
                 adapter_path=adapter_path,
                 tokenizer_config=self._tokenizer_config,
+                moe_expert_offload=self.cli_args.moe_expert_offload,
+                moe_expert_cache_mb=self.cli_args.moe_expert_cache_mb,
+                moe_expert_prefetch=self.cli_args.moe_expert_prefetch,
+                moe_expert_offload_layers=self.cli_args.moe_expert_offload_layers,
+                n_disk_moe=self.cli_args.n_disk_moe,
             )
 
         # Use the default chat template if needed
@@ -1796,6 +1801,43 @@ def main():
         "--adapter-path",
         type=str,
         help="Optional path for the trained adapter weights and config.",
+    )
+    parser.add_argument(
+        "--moe-expert-offload",
+        type=str,
+        choices=["none", "disk-lru"],
+        default="none",
+        help="Offload stacked MoE expert weights from safetensors on demand.",
+    )
+    parser.add_argument(
+        "--moe-expert-cache-mb",
+        type=int,
+        default=4096,
+        help="Maximum in-memory LRU cache for disk-offloaded expert slices.",
+    )
+    parser.add_argument(
+        "--moe-expert-offload-layers",
+        type=str,
+        default="all",
+        help=(
+            "Layer-level MoE expert offload selector, e.g. 'all', '0-19', "
+            "or '0,3,7'."
+        ),
+    )
+    parser.add_argument(
+        "--n-disk-moe",
+        type=int,
+        default=0,
+        help=(
+            "Offload MoE expert weights for the last N layers to disk LRU. "
+            "When N > 0 this enables --moe-expert-offload disk-lru."
+        ),
+    )
+    parser.add_argument(
+        "--moe-expert-prefetch",
+        action="store_true",
+        default=False,
+        help="Reserved flag for future expert prefetching.",
     )
     parser.add_argument(
         "--host",
