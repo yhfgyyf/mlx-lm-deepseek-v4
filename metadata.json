@@ -1,0 +1,8 @@
+{
+  "distribution": "mlx-lm",
+  "version": "0.31.3",
+  "module": "mlx_lm",
+  "patch": "patches/served-model-name.patch",
+  "source": "PyPI wheel mlx-lm==0.31.3",
+  "generated_from": "/Users/yang/Documents/Codex/2026-05-08/uv-python-mlx-lm/.venv/lib/python3.11/site-packages/mlx_lm"
+}
