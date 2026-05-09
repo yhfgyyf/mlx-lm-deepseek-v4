@@ -1,19 +1,39 @@
-# mlx-lm served-model-name patch
+# mlx-lm MoE disk offload fork
 
-This repository vendors the Python package module `mlx_lm` from `mlx-lm==0.31.3` with a local patch that adds `--served-model-name` support to the package server.
+This repository is an independent, git-managed fork snapshot of `mlx-lm`
+derived from the `mlx-lm==0.31.3` Python package source.
 
-## Contents
+The goal is to keep local serving changes as normal branches, commits, and pull
+requests instead of distributing standalone patch files.
 
-- `mlx_lm/`: patched package source snapshot
-- `patches/served-model-name.patch`: diff from the upstream PyPI wheel source to this patched snapshot
-- `metadata.json`: package/version/source metadata
+## Features
 
-## Apply Patch Later
+- OpenAI-compatible server `--served-model-name` support.
+- Python-level MoE expert disk LRU offload for stacked Qwen MoE weights.
+- `--n-disk-moe N`, which offloads the last `N` MoE layers to disk-backed LRU
+  execution.
+- Compatibility flag `--moe-expert-offload-layers` for explicit layer lists.
 
-From a checkout or unpacked wheel containing the upstream `mlx_lm` package directory:
+## Example
 
 ```bash
-git apply patches/served-model-name.patch
+mlx_lm.server \
+  --model /path/to/mlx/model \
+  --served-model-name qwen-local \
+  --n-disk-moe 20 \
+  --moe-expert-cache-mb 4096
 ```
 
-If upstream moved code around, inspect the rejected hunks and apply the same logic manually.
+When `--n-disk-moe` is greater than zero, `disk-lru` offload is enabled
+automatically and the selected layer set is the final `N` transformer layers.
+
+## Development
+
+All changes should be made through git branches and pull requests.
+
+```bash
+git switch -c codex/my-change
+python -m unittest discover -s tests -v
+git commit
+git push -u origin codex/my-change
+```
