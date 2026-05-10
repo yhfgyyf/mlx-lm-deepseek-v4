@@ -341,7 +341,8 @@ def load_model(
     get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type]] = _get_classes,
     moe_expert_offload: str = "none",
     moe_expert_cache_mb: int = 4096,
-    moe_expert_reserve_mb: int = 8192,
+    moe_expert_reserve_mb: int = 4096,
+    moe_expert_runtime_reserve_mb: int = 2048,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
     n_disk_moe: int | str = 0,
@@ -379,6 +380,7 @@ def load_model(
         model_path=model_path,
         cache_mb=moe_expert_cache_mb,
         reserve_mb=moe_expert_reserve_mb,
+        runtime_reserve_mb=moe_expert_runtime_reserve_mb,
     )
     if n_disk_moe_requests_offload(n_disk_moe):
         moe_expert_offload = "disk-lru"
@@ -550,7 +552,8 @@ def load(
     revision: Optional[str] = None,
     moe_expert_offload: str = "none",
     moe_expert_cache_mb: int = 4096,
-    moe_expert_reserve_mb: int = 8192,
+    moe_expert_reserve_mb: int = 4096,
+    moe_expert_runtime_reserve_mb: int = 2048,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
     n_disk_moe: int | str = 0,
@@ -591,6 +594,7 @@ def load(
         moe_expert_offload=moe_expert_offload,
         moe_expert_cache_mb=moe_expert_cache_mb,
         moe_expert_reserve_mb=moe_expert_reserve_mb,
+        moe_expert_runtime_reserve_mb=moe_expert_runtime_reserve_mb,
         moe_expert_prefetch=moe_expert_prefetch,
         moe_expert_offload_layers=moe_expert_offload_layers,
         n_disk_moe=n_disk_moe,

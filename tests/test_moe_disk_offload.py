@@ -95,6 +95,7 @@ class MoeDiskOffloadTests(unittest.TestCase):
                 root,
                 available_memory_bytes=40 + 40 + 80 + 16,
                 reserve_mb=0,
+                runtime_reserve_mb=0,
                 cache_mb=0,
             )
 
@@ -119,6 +120,29 @@ class MoeDiskOffloadTests(unittest.TestCase):
             )
 
             self.assertEqual(layers, {0, 1})
+
+    def test_auto_disk_moe_uses_remaining_load_memory_for_moe_layers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tensors = {
+                "model.embed_tokens.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.0.ffn.experts.w1.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.1.ffn.experts.w1.weight": mx.ones((20,), dtype=mx.uint32),
+                "layers.2.ffn.experts.w1.weight": mx.ones((30,), dtype=mx.uint32),
+                "layers.3.ffn.experts.w1.weight": mx.ones((40,), dtype=mx.uint32),
+            }
+            _make_indexed_safetensors(root, tensors)
+
+            layers = auto_disk_moe_layers(
+                {"num_hidden_layers": 4},
+                root,
+                available_memory_bytes=40 + 16 + 8 + 40 + 80 + 16,
+                reserve_mb=0,
+                runtime_reserve_mb=0,
+                cache_mb=4096,
+            )
+
+            self.assertEqual(layers, {2, 3})
 
     def test_store_indexes_only_selected_layers(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,8 @@
 import json
+import logging
 import re
 import subprocess
+from dataclasses import dataclass
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -201,6 +203,20 @@ def layers_from_last_n(num_layers: int, n: int) -> set[int]:
     return set(range(num_layers - n, num_layers))
 
 
+@dataclass(frozen=True)
+class AutoDiskMoePlan:
+    offload_layers: set[int]
+    resident_layers: set[int]
+    available_bytes: int
+    resident_non_expert_bytes: int
+    system_reserve_bytes: int
+    runtime_reserve_bytes: int
+    resident_expert_budget_bytes: int
+    resident_expert_bytes: int
+    total_weight_bytes: int
+    total_expert_bytes: int
+
+
 def moe_expert_bytes_by_layer(model_path: str | Path) -> tuple[int, dict[int, int]]:
     total_bytes = 0
     expert_bytes = {}
@@ -214,13 +230,18 @@ def moe_expert_bytes_by_layer(model_path: str | Path) -> tuple[int, dict[int, in
     return total_bytes, expert_bytes
 
 
-def auto_disk_moe_layers(
+def _mb_to_bytes(value: int) -> int:
+    return max(0, int(value)) * 1024 * 1024
+
+
+def plan_auto_disk_moe_layers(
     config: Any,
     model_path: str | Path,
     available_memory_bytes: Optional[int] = None,
-    reserve_mb: int = 8192,
+    reserve_mb: int = 4096,
+    runtime_reserve_mb: int = 2048,
     cache_mb: int = 4096,
-) -> set[int]:
+) -> AutoDiskMoePlan:
     num_layers = _num_hidden_layers_from_config(config)
     if num_layers is None:
         raise ValueError("--n-disk-moe auto requires num_hidden_layers in model config")
@@ -230,12 +251,10 @@ def auto_disk_moe_layers(
 
     total_bytes, expert_by_layer = moe_expert_bytes_by_layer(model_path)
     resident_non_expert = total_bytes - sum(expert_by_layer.values())
-    budget = (
-        int(available_memory_bytes)
-        - max(0, int(reserve_mb)) * 1024 * 1024
-        - max(0, int(cache_mb)) * 1024 * 1024
-        - resident_non_expert
-    )
+    system_reserve = _mb_to_bytes(reserve_mb)
+    runtime_reserve = _mb_to_bytes(runtime_reserve_mb)
+    budget = int(available_memory_bytes) - system_reserve - runtime_reserve
+    budget -= resident_non_expert
 
     resident_prefix_layers = 0
     used = 0
@@ -246,7 +265,38 @@ def auto_disk_moe_layers(
         used += layer_bytes
         resident_prefix_layers = layer_id + 1
 
-    return set(range(resident_prefix_layers, num_layers))
+    resident_layers = set(range(resident_prefix_layers))
+    offload_layers = set(range(resident_prefix_layers, num_layers))
+    return AutoDiskMoePlan(
+        offload_layers=offload_layers,
+        resident_layers=resident_layers,
+        available_bytes=int(available_memory_bytes),
+        resident_non_expert_bytes=resident_non_expert,
+        system_reserve_bytes=system_reserve,
+        runtime_reserve_bytes=runtime_reserve,
+        resident_expert_budget_bytes=max(0, budget),
+        resident_expert_bytes=used,
+        total_weight_bytes=total_bytes,
+        total_expert_bytes=sum(expert_by_layer.values()),
+    )
+
+
+def auto_disk_moe_layers(
+    config: Any,
+    model_path: str | Path,
+    available_memory_bytes: Optional[int] = None,
+    reserve_mb: int = 4096,
+    runtime_reserve_mb: int = 2048,
+    cache_mb: int = 4096,
+) -> set[int]:
+    return plan_auto_disk_moe_layers(
+        config,
+        model_path,
+        available_memory_bytes=available_memory_bytes,
+        reserve_mb=reserve_mb,
+        runtime_reserve_mb=runtime_reserve_mb,
+        cache_mb=cache_mb,
+    ).offload_layers
 
 
 def n_disk_moe_requests_offload(n_disk_moe) -> bool:
@@ -261,17 +311,34 @@ def resolve_moe_offload_layers(
     n_disk_moe: int | str = 0,
     model_path: Optional[str | Path] = None,
     cache_mb: int = 4096,
-    reserve_mb: int = 8192,
+    reserve_mb: int = 4096,
+    runtime_reserve_mb: int = 2048,
 ) -> Optional[set[int]]:
     if str(n_disk_moe).strip().lower() == "auto":
         if model_path is None:
             raise ValueError("--n-disk-moe auto requires model_path")
-        return auto_disk_moe_layers(
+        plan = plan_auto_disk_moe_layers(
             config,
             model_path,
             reserve_mb=reserve_mb,
+            runtime_reserve_mb=runtime_reserve_mb,
             cache_mb=cache_mb,
         )
+        logging.info(
+            "--n-disk-moe auto: available=%.2f GiB, non_moe=%.2f GiB, "
+            "system_reserve=%.2f GiB, runtime_reserve=%.2f GiB, "
+            "resident_moe_budget=%.2f GiB, resident_moe=%.2f GiB, "
+            "resident_layers=%d, offload_layers=%d",
+            plan.available_bytes / 1024**3,
+            plan.resident_non_expert_bytes / 1024**3,
+            plan.system_reserve_bytes / 1024**3,
+            plan.runtime_reserve_bytes / 1024**3,
+            plan.resident_expert_budget_bytes / 1024**3,
+            plan.resident_expert_bytes / 1024**3,
+            len(plan.resident_layers),
+            len(plan.offload_layers),
+        )
+        return plan.offload_layers
     if int(n_disk_moe or 0) > 0:
         num_layers = _num_hidden_layers_from_config(config)
         if num_layers is None:
