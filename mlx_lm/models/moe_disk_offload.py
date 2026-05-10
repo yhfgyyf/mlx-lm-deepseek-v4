@@ -213,6 +213,7 @@ class AutoDiskMoePlan:
     runtime_reserve_bytes: int
     resident_expert_budget_bytes: int
     resident_expert_bytes: int
+    estimated_resident_expert_bytes: int
     total_weight_bytes: int
     total_expert_bytes: int
 
@@ -241,6 +242,7 @@ def plan_auto_disk_moe_layers(
     reserve_mb: int = 4096,
     runtime_reserve_mb: int = 2048,
     cache_mb: int = 4096,
+    resident_cost_scale: float = 1.0,
 ) -> AutoDiskMoePlan:
     num_layers = _num_hidden_layers_from_config(config)
     if num_layers is None:
@@ -258,11 +260,15 @@ def plan_auto_disk_moe_layers(
 
     resident_prefix_layers = 0
     used = 0
+    estimated_used = 0
+    resident_cost_scale = max(0.0, float(resident_cost_scale))
     for layer_id in range(num_layers):
         layer_bytes = expert_by_layer.get(layer_id, 0)
-        if used + layer_bytes > budget:
+        estimated_layer_bytes = int(layer_bytes * resident_cost_scale)
+        if estimated_used + estimated_layer_bytes > budget:
             break
         used += layer_bytes
+        estimated_used += estimated_layer_bytes
         resident_prefix_layers = layer_id + 1
 
     resident_layers = set(range(resident_prefix_layers))
@@ -276,6 +282,7 @@ def plan_auto_disk_moe_layers(
         runtime_reserve_bytes=runtime_reserve,
         resident_expert_budget_bytes=max(0, budget),
         resident_expert_bytes=used,
+        estimated_resident_expert_bytes=estimated_used,
         total_weight_bytes=total_bytes,
         total_expert_bytes=sum(expert_by_layer.values()),
     )
@@ -288,6 +295,7 @@ def auto_disk_moe_layers(
     reserve_mb: int = 4096,
     runtime_reserve_mb: int = 2048,
     cache_mb: int = 4096,
+    resident_cost_scale: float = 1.0,
 ) -> set[int]:
     return plan_auto_disk_moe_layers(
         config,
@@ -296,7 +304,48 @@ def auto_disk_moe_layers(
         reserve_mb=reserve_mb,
         runtime_reserve_mb=runtime_reserve_mb,
         cache_mb=cache_mb,
+        resident_cost_scale=resident_cost_scale,
     ).offload_layers
+
+
+def expand_auto_disk_moe_layers_with_reclaimable(
+    config: Any,
+    model_path: str | Path,
+    offload_layers: set[int],
+    available_memory_bytes: Optional[int] = None,
+    reserve_mb: int = 4096,
+    runtime_reserve_mb: int = 2048,
+    resident_cost_scale: float = 1.0,
+) -> set[int]:
+    num_layers = _num_hidden_layers_from_config(config)
+    if num_layers is None:
+        raise ValueError("--n-disk-moe auto requires num_hidden_layers in model config")
+
+    if available_memory_bytes is None:
+        available_memory_bytes = globals()["available_memory_bytes"]()
+
+    _, expert_by_layer = moe_expert_bytes_by_layer(model_path)
+    extra_budget = (
+        int(available_memory_bytes)
+        - _mb_to_bytes(reserve_mb)
+        - _mb_to_bytes(runtime_reserve_mb)
+    )
+    if extra_budget <= 0:
+        return set(offload_layers)
+
+    expanded_offload = set(offload_layers)
+    used = 0
+    resident_cost_scale = max(0.0, float(resident_cost_scale))
+    for layer_id in range(num_layers):
+        if layer_id not in expanded_offload:
+            continue
+        layer_bytes = expert_by_layer.get(layer_id, 0)
+        estimated_layer_bytes = int(layer_bytes * resident_cost_scale)
+        if used + estimated_layer_bytes > extra_budget:
+            break
+        used += estimated_layer_bytes
+        expanded_offload.remove(layer_id)
+    return expanded_offload
 
 
 def n_disk_moe_requests_offload(n_disk_moe) -> bool:
@@ -313,6 +362,7 @@ def resolve_moe_offload_layers(
     cache_mb: int = 4096,
     reserve_mb: int = 4096,
     runtime_reserve_mb: int = 2048,
+    resident_cost_scale: float = 1.0,
 ) -> Optional[set[int]]:
     if str(n_disk_moe).strip().lower() == "auto":
         if model_path is None:
@@ -323,11 +373,13 @@ def resolve_moe_offload_layers(
             reserve_mb=reserve_mb,
             runtime_reserve_mb=runtime_reserve_mb,
             cache_mb=cache_mb,
+            resident_cost_scale=resident_cost_scale,
         )
         logging.info(
             "--n-disk-moe auto: available=%.2f GiB, non_moe=%.2f GiB, "
             "system_reserve=%.2f GiB, runtime_reserve=%.2f GiB, "
             "resident_moe_budget=%.2f GiB, resident_moe=%.2f GiB, "
+            "estimated_resident_moe=%.2f GiB, resident_cost_scale=%.2f, "
             "resident_layers=%d, offload_layers=%d",
             plan.available_bytes / 1024**3,
             plan.resident_non_expert_bytes / 1024**3,
@@ -335,6 +387,8 @@ def resolve_moe_offload_layers(
             plan.runtime_reserve_bytes / 1024**3,
             plan.resident_expert_budget_bytes / 1024**3,
             plan.resident_expert_bytes / 1024**3,
+            plan.estimated_resident_expert_bytes / 1024**3,
+            resident_cost_scale,
             len(plan.resident_layers),
             len(plan.offload_layers),
         )

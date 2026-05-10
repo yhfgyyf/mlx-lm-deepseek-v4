@@ -9,6 +9,7 @@ from mlx_lm.models.moe_disk_offload import (
     DiskBackedSwitchGLU,
     SafetensorsExpertStore,
     auto_disk_moe_layers,
+    expand_auto_disk_moe_layers_with_reclaimable,
     is_expert_tensor_name,
     layers_from_last_n,
     parse_layer_spec,
@@ -97,6 +98,7 @@ class MoeDiskOffloadTests(unittest.TestCase):
                 reserve_mb=0,
                 runtime_reserve_mb=0,
                 cache_mb=0,
+                resident_cost_scale=1.0,
             )
 
             self.assertEqual(layers, {2, 3})
@@ -117,6 +119,7 @@ class MoeDiskOffloadTests(unittest.TestCase):
                 available_memory_bytes=120,
                 reserve_mb=1,
                 cache_mb=0,
+                resident_cost_scale=1.0,
             )
 
             self.assertEqual(layers, {0, 1})
@@ -140,9 +143,34 @@ class MoeDiskOffloadTests(unittest.TestCase):
                 reserve_mb=0,
                 runtime_reserve_mb=0,
                 cache_mb=4096,
+                resident_cost_scale=1.0,
             )
 
             self.assertEqual(layers, {2, 3})
+
+    def test_auto_disk_moe_expands_with_post_load_reclaimable_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tensors = {
+                "model.embed_tokens.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.0.ffn.experts.w1.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.1.ffn.experts.w1.weight": mx.ones((20,), dtype=mx.uint32),
+                "layers.2.ffn.experts.w1.weight": mx.ones((30,), dtype=mx.uint32),
+                "layers.3.ffn.experts.w1.weight": mx.ones((40,), dtype=mx.uint32),
+            }
+            _make_indexed_safetensors(root, tensors)
+
+            layers = expand_auto_disk_moe_layers_with_reclaimable(
+                {"num_hidden_layers": 4},
+                root,
+                offload_layers={2, 3},
+                available_memory_bytes=120 + 8,
+                reserve_mb=0,
+                runtime_reserve_mb=0,
+                resident_cost_scale=1.0,
+            )
+
+            self.assertEqual(layers, {3})
 
     def test_store_indexes_only_selected_layers(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,10 +1,12 @@
 # Copyright © 2023-2024 Apple Inc.
 
 import copy
+import gc
 import glob
 import importlib
 import inspect
 import json
+import logging
 import os
 import resource
 import shutil
@@ -41,6 +43,7 @@ from mlx.utils import tree_flatten, tree_map, tree_reduce, tree_unflatten
 # Local imports
 from .models.moe_disk_offload import (
     configure_moe_expert_offload,
+    expand_auto_disk_moe_layers_with_reclaimable,
     is_expert_tensor_name,
     load_safetensors_excluding,
     n_disk_moe_requests_offload,
@@ -343,6 +346,7 @@ def load_model(
     moe_expert_cache_mb: int = 4096,
     moe_expert_reserve_mb: int = 4096,
     moe_expert_runtime_reserve_mb: int = 2048,
+    moe_expert_resident_cost_scale: float = 1.0,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
     n_disk_moe: int | str = 0,
@@ -381,6 +385,7 @@ def load_model(
         cache_mb=moe_expert_cache_mb,
         reserve_mb=moe_expert_reserve_mb,
         runtime_reserve_mb=moe_expert_runtime_reserve_mb,
+        resident_cost_scale=moe_expert_resident_cost_scale,
     )
     if n_disk_moe_requests_offload(n_disk_moe):
         moe_expert_offload = "disk-lru"
@@ -509,6 +514,45 @@ def load_model(
     if not lazy:
         mx.eval(model.parameters())
 
+    if str(n_disk_moe).strip().lower() == "auto" and moe_expert_layers is not None:
+        gc.collect()
+        mx.clear_cache()
+        expanded_layers = expand_auto_disk_moe_layers_with_reclaimable(
+            config,
+            model_path,
+            offload_layers=set(moe_expert_layers),
+            reserve_mb=moe_expert_reserve_mb,
+            runtime_reserve_mb=moe_expert_runtime_reserve_mb,
+            resident_cost_scale=moe_expert_resident_cost_scale,
+        )
+        if expanded_layers != set(moe_expert_layers):
+            logging.info(
+                "--n-disk-moe auto: post-load reclaimable memory can keep "
+                "%d additional MoE layers resident; reloading with "
+                "offload_layers=%d",
+                len(moe_expert_layers) - len(expanded_layers),
+                len(expanded_layers),
+            )
+            del model
+            del weights
+            gc.collect()
+            mx.clear_cache()
+            return load_model(
+                model_path,
+                lazy=lazy,
+                strict=strict,
+                model_config=model_config,
+                get_model_classes=get_model_classes,
+                moe_expert_offload="disk-lru",
+                moe_expert_cache_mb=moe_expert_cache_mb,
+                moe_expert_reserve_mb=moe_expert_reserve_mb,
+                moe_expert_runtime_reserve_mb=moe_expert_runtime_reserve_mb,
+                moe_expert_resident_cost_scale=moe_expert_resident_cost_scale,
+                moe_expert_prefetch=moe_expert_prefetch,
+                moe_expert_offload_layers=expanded_layers,
+                n_disk_moe=0,
+            )
+
     return model, config
 
 
@@ -554,6 +598,7 @@ def load(
     moe_expert_cache_mb: int = 4096,
     moe_expert_reserve_mb: int = 4096,
     moe_expert_runtime_reserve_mb: int = 2048,
+    moe_expert_resident_cost_scale: float = 1.0,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
     n_disk_moe: int | str = 0,
@@ -595,6 +640,7 @@ def load(
         moe_expert_cache_mb=moe_expert_cache_mb,
         moe_expert_reserve_mb=moe_expert_reserve_mb,
         moe_expert_runtime_reserve_mb=moe_expert_runtime_reserve_mb,
+        moe_expert_resident_cost_scale=moe_expert_resident_cost_scale,
         moe_expert_prefetch=moe_expert_prefetch,
         moe_expert_offload_layers=moe_expert_offload_layers,
         n_disk_moe=n_disk_moe,
