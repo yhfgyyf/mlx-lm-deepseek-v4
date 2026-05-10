@@ -16,13 +16,12 @@ module and CLI entry points as upstream MLX LM: `mlx_lm`, `mlx_lm.server`,
 
 ### Install From GitHub Releases
 
-Create a Python environment and install the release wheel:
+Create an environment with `uv` and install the release wheel:
 
 ```bash
-python -m venv .venv
+uv venv .venv --python 3.11
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install \
+uv pip install \
   https://github.com/yhfgyyf/mlx-lm-deepseek-v4/releases/download/v0.31.3-deepseek-v4/mlx_lm_deepseek_v4-0.31.3-py3-none-any.whl
 ```
 
@@ -40,10 +39,9 @@ For development, clone the repository and install it editable:
 ```bash
 git clone https://github.com/yhfgyyf/mlx-lm-deepseek-v4.git
 cd mlx-lm-deepseek-v4
-python -m venv .venv
+uv venv .venv --python 3.11
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
+uv pip install -e .
 ```
 
 ## What Changed
