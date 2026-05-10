@@ -10,6 +10,7 @@ from mlx_lm.models.moe_disk_offload import (
     SafetensorsExpertStore,
     auto_disk_moe_layers,
     expand_auto_disk_moe_layers_with_reclaimable,
+    available_memory_bytes_from_vm_stat,
     is_expert_tensor_name,
     layers_from_last_n,
     parse_layer_spec,
@@ -31,6 +32,19 @@ def _make_indexed_safetensors(root: Path, tensors: dict):
 
 
 class MoeDiskOffloadTests(unittest.TestCase):
+    def test_available_memory_counts_only_part_of_inactive_pages(self):
+        vm_stat = """
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               10.
+Pages inactive:                           20.
+Pages speculative:                        30.
+Pages purgeable:                          40.
+"""
+
+        available = available_memory_bytes_from_vm_stat(vm_stat, inactive_ratio=0.5)
+
+        self.assertEqual(available, (10 + 10 + 30 + 40) * 16384)
+
     def test_axis0_expert_slice_matches_full_tensor(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

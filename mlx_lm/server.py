@@ -362,6 +362,9 @@ class ModelProvider:
                 moe_expert_runtime_reserve_mb=(
                     self.cli_args.moe_expert_runtime_reserve_mb
                 ),
+                moe_expert_inactive_memory_ratio=(
+                    self.cli_args.moe_expert_inactive_memory_ratio
+                ),
                 moe_expert_prefetch=self.cli_args.moe_expert_prefetch,
                 moe_expert_offload_layers=self.cli_args.moe_expert_offload_layers,
                 n_disk_moe=self.cli_args.n_disk_moe,
@@ -1841,6 +1844,16 @@ def main():
         help=(
             "Additional runtime memory budget for MLX scratch space, KV cache, "
             "and other framework overhead when --n-disk-moe auto is used."
+        ),
+    )
+    parser.add_argument(
+        "--moe-expert-inactive-memory-ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of macOS inactive memory to count as available for "
+            "--n-disk-moe auto. Free, speculative, and purgeable memory are "
+            "counted fully."
         ),
     )
     parser.add_argument(

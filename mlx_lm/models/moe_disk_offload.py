@@ -160,11 +160,40 @@ def _num_hidden_layers_from_config(config: Any) -> Optional[int]:
     return None
 
 
-def available_memory_bytes() -> int:
+def available_memory_bytes_from_vm_stat(output: str, inactive_ratio: float = 0.5) -> int:
+    page_size_match = re.search(r"page size of (\d+) bytes", output)
+    page_size = int(page_size_match.group(1)) if page_size_match else 4096
+    inactive_ratio = min(1.0, max(0.0, float(inactive_ratio)))
+    page_weights = {
+        "Pages free": 1.0,
+        "Pages inactive": inactive_ratio,
+        "Pages speculative": 1.0,
+        "Pages purgeable": 1.0,
+    }
+    reclaimable_pages = 0.0
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().strip('"')
+        weight = page_weights.get(key)
+        if weight is None:
+            continue
+        match = re.search(r"\d+", value)
+        if match:
+            reclaimable_pages += int(match.group(0)) * weight
+    return int(reclaimable_pages * page_size)
+
+
+def available_memory_bytes(inactive_ratio: float = 0.5) -> int:
     try:
         import psutil
 
-        return int(psutil.virtual_memory().available)
+        memory = psutil.virtual_memory()
+        inactive = getattr(memory, "inactive", 0)
+        available = int(memory.available) - inactive
+        available += int(inactive * min(1.0, max(0.0, float(inactive_ratio))))
+        return max(0, available)
     except Exception:
         pass
 
@@ -173,23 +202,7 @@ def available_memory_bytes() -> int:
     except Exception as exc:
         raise RuntimeError("Could not determine available system memory") from exc
 
-    page_size_match = re.search(r"page size of (\d+) bytes", output)
-    page_size = int(page_size_match.group(1)) if page_size_match else 4096
-    reclaimable_pages = 0
-    wanted = {
-        "Pages free",
-        "Pages inactive",
-        "Pages speculative",
-        "Pages purgeable",
-    }
-    for line in output.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip().strip('"')
-        if key in wanted:
-            reclaimable_pages += int(value.strip().strip("."))
-    return reclaimable_pages * page_size
+    return available_memory_bytes_from_vm_stat(output, inactive_ratio=inactive_ratio)
 
 
 def layers_from_last_n(num_layers: int, n: int) -> set[int]:
@@ -214,6 +227,7 @@ class AutoDiskMoePlan:
     resident_expert_budget_bytes: int
     resident_expert_bytes: int
     estimated_resident_expert_bytes: int
+    inactive_memory_ratio: float
     total_weight_bytes: int
     total_expert_bytes: int
 
@@ -243,13 +257,16 @@ def plan_auto_disk_moe_layers(
     runtime_reserve_mb: int = 2048,
     cache_mb: int = 4096,
     resident_cost_scale: float = 1.0,
+    inactive_memory_ratio: float = 0.5,
 ) -> AutoDiskMoePlan:
     num_layers = _num_hidden_layers_from_config(config)
     if num_layers is None:
         raise ValueError("--n-disk-moe auto requires num_hidden_layers in model config")
 
     if available_memory_bytes is None:
-        available_memory_bytes = globals()["available_memory_bytes"]()
+        available_memory_bytes = globals()["available_memory_bytes"](
+            inactive_ratio=inactive_memory_ratio
+        )
 
     total_bytes, expert_by_layer = moe_expert_bytes_by_layer(model_path)
     resident_non_expert = total_bytes - sum(expert_by_layer.values())
@@ -283,6 +300,7 @@ def plan_auto_disk_moe_layers(
         resident_expert_budget_bytes=max(0, budget),
         resident_expert_bytes=used,
         estimated_resident_expert_bytes=estimated_used,
+        inactive_memory_ratio=float(inactive_memory_ratio),
         total_weight_bytes=total_bytes,
         total_expert_bytes=sum(expert_by_layer.values()),
     )
@@ -296,6 +314,7 @@ def auto_disk_moe_layers(
     runtime_reserve_mb: int = 2048,
     cache_mb: int = 4096,
     resident_cost_scale: float = 1.0,
+    inactive_memory_ratio: float = 0.5,
 ) -> set[int]:
     return plan_auto_disk_moe_layers(
         config,
@@ -305,6 +324,7 @@ def auto_disk_moe_layers(
         runtime_reserve_mb=runtime_reserve_mb,
         cache_mb=cache_mb,
         resident_cost_scale=resident_cost_scale,
+        inactive_memory_ratio=inactive_memory_ratio,
     ).offload_layers
 
 
@@ -316,13 +336,16 @@ def expand_auto_disk_moe_layers_with_reclaimable(
     reserve_mb: int = 4096,
     runtime_reserve_mb: int = 2048,
     resident_cost_scale: float = 1.0,
+    inactive_memory_ratio: float = 0.5,
 ) -> set[int]:
     num_layers = _num_hidden_layers_from_config(config)
     if num_layers is None:
         raise ValueError("--n-disk-moe auto requires num_hidden_layers in model config")
 
     if available_memory_bytes is None:
-        available_memory_bytes = globals()["available_memory_bytes"]()
+        available_memory_bytes = globals()["available_memory_bytes"](
+            inactive_ratio=inactive_memory_ratio
+        )
 
     _, expert_by_layer = moe_expert_bytes_by_layer(model_path)
     extra_budget = (
@@ -363,6 +386,7 @@ def resolve_moe_offload_layers(
     reserve_mb: int = 4096,
     runtime_reserve_mb: int = 2048,
     resident_cost_scale: float = 1.0,
+    inactive_memory_ratio: float = 0.5,
 ) -> Optional[set[int]]:
     if str(n_disk_moe).strip().lower() == "auto":
         if model_path is None:
@@ -374,12 +398,14 @@ def resolve_moe_offload_layers(
             runtime_reserve_mb=runtime_reserve_mb,
             cache_mb=cache_mb,
             resident_cost_scale=resident_cost_scale,
+            inactive_memory_ratio=inactive_memory_ratio,
         )
         logging.info(
             "--n-disk-moe auto: available=%.2f GiB, non_moe=%.2f GiB, "
             "system_reserve=%.2f GiB, runtime_reserve=%.2f GiB, "
             "resident_moe_budget=%.2f GiB, resident_moe=%.2f GiB, "
             "estimated_resident_moe=%.2f GiB, resident_cost_scale=%.2f, "
+            "inactive_memory_ratio=%.2f, "
             "resident_layers=%d, offload_layers=%d",
             plan.available_bytes / 1024**3,
             plan.resident_non_expert_bytes / 1024**3,
@@ -389,6 +415,7 @@ def resolve_moe_offload_layers(
             plan.resident_expert_bytes / 1024**3,
             plan.estimated_resident_expert_bytes / 1024**3,
             resident_cost_scale,
+            inactive_memory_ratio,
             len(plan.resident_layers),
             len(plan.offload_layers),
         )

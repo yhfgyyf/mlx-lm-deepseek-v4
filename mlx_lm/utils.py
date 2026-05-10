@@ -347,6 +347,7 @@ def load_model(
     moe_expert_reserve_mb: int = 4096,
     moe_expert_runtime_reserve_mb: int = 2048,
     moe_expert_resident_cost_scale: float = 1.0,
+    moe_expert_inactive_memory_ratio: float = 0.5,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
     n_disk_moe: int | str = 0,
@@ -386,6 +387,7 @@ def load_model(
         reserve_mb=moe_expert_reserve_mb,
         runtime_reserve_mb=moe_expert_runtime_reserve_mb,
         resident_cost_scale=moe_expert_resident_cost_scale,
+        inactive_memory_ratio=moe_expert_inactive_memory_ratio,
     )
     if n_disk_moe_requests_offload(n_disk_moe):
         moe_expert_offload = "disk-lru"
@@ -524,6 +526,7 @@ def load_model(
             reserve_mb=moe_expert_reserve_mb,
             runtime_reserve_mb=moe_expert_runtime_reserve_mb,
             resident_cost_scale=moe_expert_resident_cost_scale,
+            inactive_memory_ratio=moe_expert_inactive_memory_ratio,
         )
         if expanded_layers != set(moe_expert_layers):
             logging.info(
@@ -548,6 +551,7 @@ def load_model(
                 moe_expert_reserve_mb=moe_expert_reserve_mb,
                 moe_expert_runtime_reserve_mb=moe_expert_runtime_reserve_mb,
                 moe_expert_resident_cost_scale=moe_expert_resident_cost_scale,
+                moe_expert_inactive_memory_ratio=moe_expert_inactive_memory_ratio,
                 moe_expert_prefetch=moe_expert_prefetch,
                 moe_expert_offload_layers=expanded_layers,
                 n_disk_moe=0,
@@ -599,6 +603,7 @@ def load(
     moe_expert_reserve_mb: int = 4096,
     moe_expert_runtime_reserve_mb: int = 2048,
     moe_expert_resident_cost_scale: float = 1.0,
+    moe_expert_inactive_memory_ratio: float = 0.5,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
     n_disk_moe: int | str = 0,
@@ -641,6 +646,7 @@ def load(
         moe_expert_reserve_mb=moe_expert_reserve_mb,
         moe_expert_runtime_reserve_mb=moe_expert_runtime_reserve_mb,
         moe_expert_resident_cost_scale=moe_expert_resident_cost_scale,
+        moe_expert_inactive_memory_ratio=moe_expert_inactive_memory_ratio,
         moe_expert_prefetch=moe_expert_prefetch,
         moe_expert_offload_layers=moe_expert_offload_layers,
         n_disk_moe=n_disk_moe,
