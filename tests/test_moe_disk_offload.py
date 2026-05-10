@@ -8,6 +8,7 @@ import mlx.core as mx
 from mlx_lm.models.moe_disk_offload import (
     DiskBackedSwitchGLU,
     SafetensorsExpertStore,
+    auto_disk_moe_layers,
     is_expert_tensor_name,
     layers_from_last_n,
     parse_layer_spec,
@@ -73,6 +74,51 @@ class MoeDiskOffloadTests(unittest.TestCase):
             ),
             set(range(23, 43)),
         )
+
+    def test_auto_disk_moe_keeps_prefix_layers_that_fit_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tensors = {
+                "model.embed_tokens.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.0.ffn.experts.w1.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.1.ffn.experts.w1.weight": mx.ones((20,), dtype=mx.uint32),
+                "layers.2.ffn.experts.w1.weight": mx.ones((30,), dtype=mx.uint32),
+                "layers.3.ffn.experts.w1.weight": mx.ones((40,), dtype=mx.uint32),
+            }
+            _make_indexed_safetensors(root, tensors)
+
+            # 40 bytes non-expert + 40 + 80 bytes for layers 0 and 1 fit.
+            # Layer 2 would require another 120 bytes, so layers 2 and 3
+            # become the disk-offloaded suffix.
+            layers = auto_disk_moe_layers(
+                {"num_hidden_layers": 4},
+                root,
+                available_memory_bytes=40 + 40 + 80 + 16,
+                reserve_mb=0,
+                cache_mb=0,
+            )
+
+            self.assertEqual(layers, {2, 3})
+
+    def test_auto_disk_moe_respects_reserved_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tensors = {
+                "model.embed_tokens.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.0.ffn.experts.w1.weight": mx.ones((10,), dtype=mx.uint32),
+                "layers.1.ffn.experts.w1.weight": mx.ones((10,), dtype=mx.uint32),
+            }
+            _make_indexed_safetensors(root, tensors)
+
+            layers = auto_disk_moe_layers(
+                {"num_hidden_layers": 2},
+                root,
+                available_memory_bytes=120,
+                reserve_mb=1,
+                cache_mb=0,
+            )
+
+            self.assertEqual(layers, {0, 1})
 
     def test_store_indexes_only_selected_layers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -198,6 +244,43 @@ class MoeDiskOffloadTests(unittest.TestCase):
         self.assertIn("lm_head.biases", sanitized)
         self.assertEqual(sanitized["model.layers.0.attn.wo_a.weight"].shape, (2, 4, 4))
         self.assertEqual(sanitized["model.layers.0.attn.wo_a.scales"].shape, (2, 4, 1))
+
+    def test_deepseek_v4_sanitize_remaps_stacked_raw_experts(self):
+        args = DeepseekV4ModelArgs(
+            vocab_size=16,
+            hidden_size=8,
+            intermediate_size=16,
+            moe_intermediate_size=4,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            n_routed_experts=2,
+            num_experts_per_tok=1,
+            q_lora_rank=4,
+            qk_rope_head_dim=2,
+            head_dim=4,
+            compress_ratios=[0],
+            o_groups=1,
+            o_lora_rank=4,
+            num_nextn_predict_layers=0,
+        )
+        model = DeepseekV4Model(args)
+        weights = {
+            "layers.0.ffn.experts.w1.weight": mx.ones((2, 4, 8), dtype=mx.uint32),
+            "layers.0.ffn.experts.w1.scales": mx.ones((2, 4, 1)),
+            "layers.0.ffn.experts.w1.biases": mx.ones((2, 4, 1)),
+            "layers.0.ffn.experts.w2.weight": mx.ones((2, 8, 4), dtype=mx.uint32),
+            "layers.0.ffn.experts.w3.weight": mx.ones((2, 4, 8), dtype=mx.uint32),
+        }
+
+        sanitized = model.sanitize(weights)
+
+        self.assertIn("model.layers.0.ffn.switch_mlp.gate_proj.weight", sanitized)
+        self.assertIn("model.layers.0.ffn.switch_mlp.gate_proj.scales", sanitized)
+        self.assertIn("model.layers.0.ffn.switch_mlp.gate_proj.biases", sanitized)
+        self.assertIn("model.layers.0.ffn.switch_mlp.down_proj.weight", sanitized)
+        self.assertIn("model.layers.0.ffn.switch_mlp.up_proj.weight", sanitized)
+        self.assertNotIn("model.layers.0.ffn.experts.w1.weight", sanitized)
 
 
 if __name__ == "__main__":

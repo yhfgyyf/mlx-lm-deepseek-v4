@@ -358,6 +358,7 @@ class ModelProvider:
                 tokenizer_config=self._tokenizer_config,
                 moe_expert_offload=self.cli_args.moe_expert_offload,
                 moe_expert_cache_mb=self.cli_args.moe_expert_cache_mb,
+                moe_expert_reserve_mb=self.cli_args.moe_expert_reserve_mb,
                 moe_expert_prefetch=self.cli_args.moe_expert_prefetch,
                 moe_expert_offload_layers=self.cli_args.moe_expert_offload_layers,
                 n_disk_moe=self.cli_args.n_disk_moe,
@@ -1822,6 +1823,15 @@ def main():
         help="Maximum in-memory LRU cache for disk-offloaded expert slices.",
     )
     parser.add_argument(
+        "--moe-expert-reserve-mb",
+        type=int,
+        default=8192,
+        help=(
+            "Memory to leave unused when --n-disk-moe auto chooses how many "
+            "MoE layers to keep resident."
+        ),
+    )
+    parser.add_argument(
         "--moe-expert-offload-layers",
         type=str,
         default="all",
@@ -1832,11 +1842,12 @@ def main():
     )
     parser.add_argument(
         "--n-disk-moe",
-        type=int,
-        default=0,
+        type=str,
+        default="0",
         help=(
-            "Offload MoE expert weights for the last N layers to disk LRU. "
-            "When N > 0 this enables --moe-expert-offload disk-lru."
+            "Offload MoE expert weights for the last N layers to disk LRU, "
+            "or use 'auto' to keep as many prefix layers resident as available "
+            "memory allows after reserve/cache budgets."
         ),
     )
     parser.add_argument(

@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -50,6 +51,35 @@ def _read_header(path: Path):
         header_len = int.from_bytes(f.read(8), "little")
         header = json.loads(f.read(header_len))
     return header, 8 + header_len
+
+
+def _tensor_nbytes(entry: dict) -> int:
+    start, end = [int(x) for x in entry["data_offsets"]]
+    return end - start
+
+
+def _iter_tensor_entries(model_path: str | Path):
+    model_path = Path(model_path).expanduser()
+    index_path = model_path / "model.safetensors.index.json"
+    headers = {}
+
+    if index_path.exists():
+        with open(index_path) as f:
+            weight_map = json.load(f).get("weight_map", {})
+        for tensor_name, shard_name in weight_map.items():
+            shard_path = model_path / shard_name
+            if shard_path not in headers:
+                headers[shard_path] = _read_header(shard_path)[0]
+            entry = headers[shard_path].get(tensor_name)
+            if entry is not None:
+                yield tensor_name, entry
+        return
+
+    for shard_path in sorted(model_path.glob("*.safetensors")):
+        header, _ = _read_header(shard_path)
+        for tensor_name, entry in header.items():
+            if tensor_name != "__metadata__":
+                yield tensor_name, entry
 
 
 def _array_from_bytes(raw, entry: dict):
@@ -128,6 +158,38 @@ def _num_hidden_layers_from_config(config: Any) -> Optional[int]:
     return None
 
 
+def available_memory_bytes() -> int:
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        pass
+
+    try:
+        output = subprocess.check_output(["vm_stat"], text=True)
+    except Exception as exc:
+        raise RuntimeError("Could not determine available system memory") from exc
+
+    page_size_match = re.search(r"page size of (\d+) bytes", output)
+    page_size = int(page_size_match.group(1)) if page_size_match else 4096
+    reclaimable_pages = 0
+    wanted = {
+        "Pages free",
+        "Pages inactive",
+        "Pages speculative",
+        "Pages purgeable",
+    }
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().strip('"')
+        if key in wanted:
+            reclaimable_pages += int(value.strip().strip("."))
+    return reclaimable_pages * page_size
+
+
 def layers_from_last_n(num_layers: int, n: int) -> set[int]:
     num_layers = int(num_layers)
     n = int(n or 0)
@@ -139,11 +201,77 @@ def layers_from_last_n(num_layers: int, n: int) -> set[int]:
     return set(range(num_layers - n, num_layers))
 
 
+def moe_expert_bytes_by_layer(model_path: str | Path) -> tuple[int, dict[int, int]]:
+    total_bytes = 0
+    expert_bytes = {}
+    for tensor_name, entry in _iter_tensor_entries(model_path):
+        nbytes = _tensor_nbytes(entry)
+        total_bytes += nbytes
+        if is_expert_tensor_name(tensor_name):
+            layer_id = _layer_id_from_tensor_name(tensor_name)
+            if layer_id is not None:
+                expert_bytes[layer_id] = expert_bytes.get(layer_id, 0) + nbytes
+    return total_bytes, expert_bytes
+
+
+def auto_disk_moe_layers(
+    config: Any,
+    model_path: str | Path,
+    available_memory_bytes: Optional[int] = None,
+    reserve_mb: int = 8192,
+    cache_mb: int = 4096,
+) -> set[int]:
+    num_layers = _num_hidden_layers_from_config(config)
+    if num_layers is None:
+        raise ValueError("--n-disk-moe auto requires num_hidden_layers in model config")
+
+    if available_memory_bytes is None:
+        available_memory_bytes = globals()["available_memory_bytes"]()
+
+    total_bytes, expert_by_layer = moe_expert_bytes_by_layer(model_path)
+    resident_non_expert = total_bytes - sum(expert_by_layer.values())
+    budget = (
+        int(available_memory_bytes)
+        - max(0, int(reserve_mb)) * 1024 * 1024
+        - max(0, int(cache_mb)) * 1024 * 1024
+        - resident_non_expert
+    )
+
+    resident_prefix_layers = 0
+    used = 0
+    for layer_id in range(num_layers):
+        layer_bytes = expert_by_layer.get(layer_id, 0)
+        if used + layer_bytes > budget:
+            break
+        used += layer_bytes
+        resident_prefix_layers = layer_id + 1
+
+    return set(range(resident_prefix_layers, num_layers))
+
+
+def n_disk_moe_requests_offload(n_disk_moe) -> bool:
+    if str(n_disk_moe).strip().lower() == "auto":
+        return True
+    return int(n_disk_moe or 0) > 0
+
+
 def resolve_moe_offload_layers(
     config: Any,
     explicit_layers="all",
-    n_disk_moe: int = 0,
+    n_disk_moe: int | str = 0,
+    model_path: Optional[str | Path] = None,
+    cache_mb: int = 4096,
+    reserve_mb: int = 8192,
 ) -> Optional[set[int]]:
+    if str(n_disk_moe).strip().lower() == "auto":
+        if model_path is None:
+            raise ValueError("--n-disk-moe auto requires model_path")
+        return auto_disk_moe_layers(
+            config,
+            model_path,
+            reserve_mb=reserve_mb,
+            cache_mb=cache_mb,
+        )
     if int(n_disk_moe or 0) > 0:
         num_layers = _num_hidden_layers_from_config(config)
         if num_layers is None:

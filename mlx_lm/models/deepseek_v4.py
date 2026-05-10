@@ -1142,6 +1142,20 @@ class Model(nn.Module):
                 ("w2", "down_proj"),
                 ("w3", "up_proj"),
             ):
+                for suffix in ("weight", "scales", "biases", "bias"):
+                    key = f"{prefix}.{src}.{suffix}"
+                    if key in weights:
+                        weights[
+                            f"model.layers.{layer_idx}.ffn.switch_mlp.{dst}.{suffix}"
+                        ] = weights.pop(key)
+
+        for layer_idx in range(n_layers):
+            prefix = f"model.layers.{layer_idx}.ffn.experts"
+            for src, dst in (
+                ("w1", "gate_proj"),
+                ("w2", "down_proj"),
+                ("w3", "up_proj"),
+            ):
                 for suffix in ("weight", "scales"):
                     key0 = f"{prefix}.0.{src}.{suffix}"
                     if key0 in weights:

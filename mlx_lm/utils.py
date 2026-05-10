@@ -43,6 +43,7 @@ from .models.moe_disk_offload import (
     configure_moe_expert_offload,
     is_expert_tensor_name,
     load_safetensors_excluding,
+    n_disk_moe_requests_offload,
     resolve_moe_offload_layers,
 )
 from .tokenizer_utils import TokenizerWrapper
@@ -340,9 +341,10 @@ def load_model(
     get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type]] = _get_classes,
     moe_expert_offload: str = "none",
     moe_expert_cache_mb: int = 4096,
+    moe_expert_reserve_mb: int = 8192,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
-    n_disk_moe: int = 0,
+    n_disk_moe: int | str = 0,
 ) -> Tuple[nn.Module, dict]:
     """
     Load and initialize the model from a given path.
@@ -374,8 +376,11 @@ def load_model(
         config,
         explicit_layers=moe_expert_offload_layers,
         n_disk_moe=n_disk_moe,
+        model_path=model_path,
+        cache_mb=moe_expert_cache_mb,
+        reserve_mb=moe_expert_reserve_mb,
     )
-    if int(n_disk_moe or 0) > 0:
+    if n_disk_moe_requests_offload(n_disk_moe):
         moe_expert_offload = "disk-lru"
 
     weight_files = glob.glob(str(model_path / "model*.safetensors"))
@@ -545,9 +550,10 @@ def load(
     revision: Optional[str] = None,
     moe_expert_offload: str = "none",
     moe_expert_cache_mb: int = 4096,
+    moe_expert_reserve_mb: int = 8192,
     moe_expert_prefetch: bool = False,
     moe_expert_offload_layers: str = "all",
-    n_disk_moe: int = 0,
+    n_disk_moe: int | str = 0,
 ) -> Union[
     Tuple[nn.Module, TokenizerWrapper],
     Tuple[nn.Module, TokenizerWrapper, Dict[str, Any]],
@@ -584,6 +590,7 @@ def load(
         model_config=model_config,
         moe_expert_offload=moe_expert_offload,
         moe_expert_cache_mb=moe_expert_cache_mb,
+        moe_expert_reserve_mb=moe_expert_reserve_mb,
         moe_expert_prefetch=moe_expert_prefetch,
         moe_expert_offload_layers=moe_expert_offload_layers,
         n_disk_moe=n_disk_moe,
