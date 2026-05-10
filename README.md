@@ -14,15 +14,16 @@ This fork is packaged as `mlx-lm-deepseek-v4`. It installs the same Python
 module and CLI entry points as upstream MLX LM: `mlx_lm`, `mlx_lm.server`,
 `mlx_lm.generate`, and the rest of the `mlx_lm.*` commands.
 
-### Install From a Wheel
+### Install From GitHub Releases
 
-Download or build the wheel, then install it into a Python environment:
+Create a Python environment and install the release wheel:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install dist/mlx_lm_deepseek_v4-0.31.3-py3-none-any.whl
+python -m pip install \
+  https://github.com/yhfgyyf/mlx-lm-deepseek-v4/releases/download/v0.31.3-deepseek-v4/mlx_lm_deepseek_v4-0.31.3-py3-none-any.whl
 ```
 
 After installation, verify the CLI is available:
@@ -32,22 +33,16 @@ mlx_lm.server --help
 python -c "import mlx_lm; print(mlx_lm.__version__)"
 ```
 
-### Build the Wheel Locally
+### Install From the Source Checkout
 
-From the repository root:
-
-```bash
-python -m pip install --upgrade build
-python -m build --wheel
-```
-
-The wheel will be written to `dist/`.
-
-### Install From the Local Checkout
-
-For development:
+For development, clone the repository and install it editable:
 
 ```bash
+git clone https://github.com/yhfgyyf/mlx-lm-deepseek-v4.git
+cd mlx-lm-deepseek-v4
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
