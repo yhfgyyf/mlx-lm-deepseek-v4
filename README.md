@@ -1,283 +1,142 @@
-## MLX LM 
+# mlx-lm-deepseek-v4
 
-MLX LM is a Python package for generating text and fine-tuning large language
-models on Apple silicon with MLX.
+This repository is an experimental fork of
+[ml-explore/mlx-lm](https://github.com/ml-explore/mlx-lm) focused on running
+large DeepSeek V4 / MoE MLX models on Apple silicon with layer-level expert
+disk offload.
 
-Some key features include:
+The current branch includes upstream DeepSeek V4 support plus local changes for
+OpenAI-compatible serving, model-name aliases, and MoE expert offload sizing.
 
-* Integration with the Hugging Face Hub to easily use thousands of LLMs with a
-  single command. 
-* Support for quantizing and uploading models to the Hugging Face Hub.
-* [Low-rank and full model
-  fine-tuning](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/LORA.md)
-  with support for quantized models.
-* Distributed inference and fine-tuning with `mx.distributed`
+## What Changed
 
-The easiest way to get started is to install the `mlx-lm` package:
+- Applied upstream DeepSeek V4 model support.
+- Added `--served-model-name` to expose a stable public model id from
+  `/v1/models` and chat/completion responses while loading weights from a local
+  path.
+- Added MoE routed-expert disk offload for stacked MLX safetensors layouts.
+- Added `--n-disk-moe N` to offload the last `N` MoE layers.
+- Added `--n-disk-moe auto` to choose how many prefix MoE layers stay resident
+  based on load-time memory.
+- Added macOS-aware memory sizing that counts only part of inactive memory by
+  default, avoiding the Metal OOMs seen when inactive memory is treated as fully
+  usable.
+- Added DeepSeek V4 raw expert weight remapping so mixed resident/offloaded
+  expert layers can load correctly.
 
-**With `pip`**:
+## Auto MoE Sizing
 
-```sh
-pip install mlx-lm
+`--n-disk-moe auto` computes:
+
+```text
+available memory
+- non-MoE resident weights
+- system reserve
+- runtime reserve
+= resident MoE budget
 ```
 
-**With `conda`**:
+On macOS, `available memory` is estimated as:
 
-```sh
-conda install -c conda-forge mlx-lm
+```text
+free + speculative + purgeable + inactive * inactive_ratio
 ```
 
-### Quick Start
+The default `inactive_ratio` is `0.5`. This deliberately uses only part of
+inactive memory because MLX/Metal can fail with command-buffer OOM even when
+macOS still reports reclaimable inactive pages.
 
-To generate text with an LLM use:
+Relevant server flags:
 
 ```bash
-mlx_lm.generate --prompt "How tall is Mt Everest?"
+--n-disk-moe auto
+--moe-expert-reserve-mb 4096
+--moe-expert-runtime-reserve-mb 2048
+--moe-expert-inactive-memory-ratio 0.5
+--moe-expert-cache-mb 4096
 ```
 
-To chat with an LLM use:
+If the model is too conservative, raise `--moe-expert-inactive-memory-ratio`.
+If generation crashes with Metal OOM, lower it.
+
+## Example Server
 
 ```bash
-mlx_lm.chat
+export MODEL_DIR=/path/to/deepseek-ai-DeepSeek-V4-Flash-3bit
+
+PYTHONPATH=/path/to/mlx-lm python -m mlx_lm.server \
+  --host 127.0.0.1 \
+  --port 8081 \
+  --model "$MODEL_DIR" \
+  --served-model-name deepseek-v4-flash-3bit \
+  --max-tokens 256 \
+  --n-disk-moe auto \
+  --moe-expert-reserve-mb 4096 \
+  --moe-expert-runtime-reserve-mb 2048 \
+  --moe-expert-inactive-memory-ratio 0.5 \
+  --moe-expert-cache-mb 4096 \
+  --trust-remote-code
 ```
 
-This will give you a chat REPL that you can use to interact with the LLM. The
-chat context is preserved during the lifetime of the REPL.
+The server logs the auto decision at startup, for example:
 
-Commands in `mlx-lm` typically take command line options which let you specify
-the model, sampling parameters, and more. Use `-h` to see a list of available
-options for a command, e.g.:
+```text
+--n-disk-moe auto: available=17.32 GiB, non_moe=3.18 GiB,
+system_reserve=4.00 GiB, runtime_reserve=2.00 GiB,
+resident_moe_budget=8.15 GiB, resident_moe=7.88 GiB,
+resident_cost_scale=1.00, inactive_memory_ratio=0.50,
+resident_layers=3, offload_layers=40
+```
+
+## Smoke Test
 
 ```bash
-mlx_lm.generate -h
+curl http://127.0.0.1:8081/v1/models
+
+curl http://127.0.0.1:8081/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-v4-flash-3bit",
+    "messages": [{"role": "user", "content": "只输出 OK"}],
+    "max_tokens": 4,
+    "temperature": 0
+  }'
 ```
 
-The default model for generation and chat is
-`mlx-community/Llama-3.2-3B-Instruct-4bit`.  You can specify any MLX-compatible
-model with the `--model` flag. Thousands are available in the
-[MLX Community](https://huggingface.co/mlx-community) Hugging Face
-organization.
+## Recent Local Benchmark
 
-### Python API
+Environment: local DeepSeek V4 Flash 3-bit MLX model, server with
+`--n-disk-moe auto`, `--moe-expert-inactive-memory-ratio 0.5`.
 
-You can use `mlx-lm` as a module:
+Prompt/output:
 
-```python
-from mlx_lm import load, generate
+- Input: about 1024 tokens under the DeepSeek tokenizer/chat template
+- Output: 32 tokens
 
-model, tokenizer = load("mlx-community/Mistral-7B-Instruct-v0.3-4bit")
+Result:
 
-prompt = "Write a story about Einstein"
-
-messages = [{"role": "user", "content": prompt}]
-prompt = tokenizer.apply_chat_template(
-    messages, add_generation_prompt=True,
-)
-
-text = generate(model, tokenizer, prompt=prompt, verbose=True)
+```text
+TTFT: 30.10 s
+Decode time: 17.63 s
+Total time: 47.72 s
+Decode TPS: 1.82 tok/s
+Overall TPS: 0.67 tok/s
 ```
 
-To see a description of all the arguments you can do:
+## Validation
 
-```
->>> help(generate)
-```
-
-Check out the [generation
-example](https://github.com/ml-explore/mlx-lm/tree/main/mlx_lm/examples/generate_response.py)
-to see how to use the API in more detail. Check out the [batch generation
-example](https://github.com/ml-explore/mlx-lm/tree/main/mlx_lm/examples/batch_generate_response.py)
-to see how to efficiently generate continuations for a batch of prompts.
-
-The `mlx-lm` package also comes with functionality to quantize and optionally
-upload models to the Hugging Face Hub.
-
-You can convert models using the Python API:
-
-```python
-from mlx_lm import convert
-
-repo = "mistralai/Mistral-7B-Instruct-v0.3"
-upload_repo = "mlx-community/My-Mistral-7B-Instruct-v0.3-4bit"
-
-convert(repo, quantize=True, upload_repo=upload_repo)
-```
-
-This will generate a 4-bit quantized Mistral 7B and upload it to the repo
-`mlx-community/My-Mistral-7B-Instruct-v0.3-4bit`. It will also save the
-converted model in the path `mlx_model` by default.
-
-To see a description of all the arguments you can do:
-
-```
->>> help(convert)
-```
-
-#### Streaming
-
-For streaming generation, use the `stream_generate` function. This yields
-a generation response object.
-
-For example,
-
-```python
-from mlx_lm import load, stream_generate
-
-repo = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
-model, tokenizer = load(repo)
-
-prompt = "Write a story about Einstein"
-
-messages = [{"role": "user", "content": prompt}]
-prompt = tokenizer.apply_chat_template(
-    messages, add_generation_prompt=True,
-)
-
-for response in stream_generate(model, tokenizer, prompt, max_tokens=512):
-    print(response.text, end="", flush=True)
-print()
-```
-
-#### Sampling
-
-The `generate` and `stream_generate` functions accept `sampler` and
-`logits_processors` keyword arguments. A sampler is any callable which accepts
-a possibly batched logits array and returns an array of sampled tokens.  The
-`logits_processors` must be a list of callables which take the token history
-and current logits as input and return the processed logits. The logits
-processors are applied in order.
-
-Some standard sampling functions and logits processors are provided in
-`mlx_lm.sample_utils`.
-
-### Command Line
-
-You can also use `mlx-lm` from the command line with:
-
-```
-mlx_lm.generate --model mistralai/Mistral-7B-Instruct-v0.3 --prompt "hello"
-```
-
-This will download a Mistral 7B model from the Hugging Face Hub and generate
-text using the given prompt.
-
-For a full list of options run:
-
-```
-mlx_lm.generate --help
-```
-
-To quantize a model from the command line run:
-
-```
-mlx_lm.convert --model mistralai/Mistral-7B-Instruct-v0.3 -q
-```
-
-For more options run:
-
-```
-mlx_lm.convert --help
-```
-
-You can upload new models to Hugging Face by specifying `--upload-repo` to
-`convert`. For example, to upload a quantized Mistral-7B model to the
-[MLX Hugging Face community](https://huggingface.co/mlx-community) you can do:
-
-```
-mlx_lm.convert \
-    --model mistralai/Mistral-7B-Instruct-v0.3 \
-    -q \
-    --upload-repo mlx-community/my-4bit-mistral
-```
-
-Models can also be converted and quantized directly in the
-[mlx-my-repo](https://huggingface.co/spaces/mlx-community/mlx-my-repo) Hugging
-Face Space.
-
-### Long Prompts and Generations 
-
-`mlx-lm` has some tools to scale efficiently to long prompts and generations:
-
-- A rotating fixed-size key-value cache.
-- Prompt caching
-
-To use the rotating key-value cache pass the argument `--max-kv-size n` where
-`n` can be any integer. Smaller values like `512` will use very little RAM but
-result in worse quality. Larger values like `4096` or higher will use more RAM
-but have better quality.
-
-Caching prompts can substantially speedup reusing the same long context with
-different queries. To cache a prompt use `mlx_lm.cache_prompt`. For example:
+The current branch was checked with:
 
 ```bash
-cat prompt.txt | mlx_lm.cache_prompt \
-  --model mistralai/Mistral-7B-Instruct-v0.3 \
-  --prompt - \
-  --prompt-cache-file mistral_prompt.safetensors
-``` 
-
-Then use the cached prompt with `mlx_lm.generate`:
-
-```
-mlx_lm.generate \
-    --prompt-cache-file mistral_prompt.safetensors \
-    --prompt "\nSummarize the above text."
+python -m unittest -v tests.test_moe_disk_offload tests.test_server.TestServedModelName
+python -m py_compile mlx_lm/models/moe_disk_offload.py mlx_lm/utils.py mlx_lm/server.py
 ```
 
-The cached prompt is treated as a prefix to the supplied prompt. Also notice
-when using a cached prompt, the model to use is read from the cache and need
-not be supplied explicitly.
+## Notes
 
-Prompt caching can also be used in the Python API in order to avoid
-recomputing the prompt. This is useful in multi-turn dialogues or across
-requests that use the same context. See the
-[example](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/examples/chat.py)
-for more usage details.
+This is a Python-layer prototype. It does not implement llama.cpp-style
+zero-copy mmap execution in MLX core. Offloaded expert slices are read from
+safetensors on demand and kept in an LRU cache.
 
-### Supported Models
-
-`mlx-lm` supports thousands of LLMs available on the Hugging Face Hub. If the
-model you want to run is not supported, file an
-[issue](https://github.com/ml-explore/mlx-lm/issues/new) or better yet, submit
-a pull request. Many supported models are available in various quantization
-formats in the [MLX Community](https://huggingface.co/mlx-community) Hugging
-Face organization.
-
-For some models the tokenizer may require you to enable the `trust_remote_code`
-option. You can do this by passing `--trust-remote-code` in the command line.
-If you don't specify the flag explicitly, you will be prompted to trust remote
-code in the terminal when running the model. 
-
-Tokenizer options can also be set in the Python API. For example:
-
-```python
-model, tokenizer = load(
-    "qwen/Qwen-7B",
-    tokenizer_config={"eos_token": "<|endoftext|>", "trust_remote_code": True},
-)
-```
-
-### Large Models
-
-> [!NOTE]
-    This requires macOS 15.0 or higher to work.
-
-Models which are large relative to the total RAM available on the machine can
-be slow. `mlx-lm` will attempt to make them faster by wiring the memory
-occupied by the model and cache. This requires macOS 15 or higher to
-work.
-
-If you see the following warning message:
-
-> [WARNING] Generating with a model that requires ...
-
-then the model will likely be slow on the given machine. If the model fits in
-RAM then it can often be sped up by increasing the system wired memory limit.
-To increase the limit, set the following `sysctl`:
-
-```bash
-sudo sysctl iogpu.wired_limit_mb=N
-```
-
-The value `N` should be larger than the size of the model in megabytes but
-smaller than the memory size of the machine.
+For best stability, tune `--moe-expert-inactive-memory-ratio` together with the
+reserve flags on the target machine and prompt length.
