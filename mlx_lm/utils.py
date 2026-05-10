@@ -39,6 +39,12 @@ resource.setrlimit(resource.RLIMIT_NOFILE, (2048, 4096))
 from mlx.utils import tree_flatten, tree_map, tree_reduce, tree_unflatten
 
 # Local imports
+from .models.moe_disk_offload import (
+    configure_moe_expert_offload,
+    is_expert_tensor_name,
+    load_safetensors_excluding,
+    resolve_moe_offload_layers,
+)
 from .tokenizer_utils import TokenizerWrapper
 from .tokenizer_utils import load as _load_tokenizer
 
@@ -332,6 +338,11 @@ def load_model(
     strict: bool = True,
     model_config: Optional[Dict[str, Any]] = None,
     get_model_classes: Callable[[dict], Tuple[Type[nn.Module], Type]] = _get_classes,
+    moe_expert_offload: str = "none",
+    moe_expert_cache_mb: int = 4096,
+    moe_expert_prefetch: bool = False,
+    moe_expert_offload_layers: str = "all",
+    n_disk_moe: int = 0,
 ) -> Tuple[nn.Module, dict]:
     """
     Load and initialize the model from a given path.
@@ -359,15 +370,35 @@ def load_model(
     config = load_config(model_path)
     if model_config is not None:
         config.update(model_config)
+    moe_expert_layers = resolve_moe_offload_layers(
+        config,
+        explicit_layers=moe_expert_offload_layers,
+        n_disk_moe=n_disk_moe,
+    )
+    if int(n_disk_moe or 0) > 0:
+        moe_expert_offload = "disk-lru"
 
     weight_files = glob.glob(str(model_path / "model*.safetensors"))
 
     if not weight_files and strict:
         raise FileNotFoundError(f"No safetensors found in {model_path}")
 
-    weights = {}
-    for wf in weight_files:
-        weights.update(_load_safetensors(wf))
+    configure_moe_expert_offload(
+        moe_expert_offload,
+        model_path,
+        cache_mb=moe_expert_cache_mb,
+        prefetch=moe_expert_prefetch,
+        layers=moe_expert_layers,
+    )
+    if moe_expert_offload == "disk-lru":
+        weights = load_safetensors_excluding(
+            weight_files,
+            lambda name: is_expert_tensor_name(name, layers=moe_expert_layers),
+        )
+    else:
+        weights = {}
+        for wf in weight_files:
+            weights.update(_load_safetensors(wf))
 
     if (model_file := config.get("model_file")) is not None:
         spec = importlib.util.spec_from_file_location(
@@ -512,6 +543,11 @@ def load(
     lazy: bool = False,
     return_config: bool = False,
     revision: Optional[str] = None,
+    moe_expert_offload: str = "none",
+    moe_expert_cache_mb: int = 4096,
+    moe_expert_prefetch: bool = False,
+    moe_expert_offload_layers: str = "all",
+    n_disk_moe: int = 0,
 ) -> Union[
     Tuple[nn.Module, TokenizerWrapper],
     Tuple[nn.Module, TokenizerWrapper, Dict[str, Any]],
@@ -542,7 +578,16 @@ def load(
     """
     model_path = _download(path_or_hf_repo, revision=revision)
 
-    model, config = load_model(model_path, lazy, model_config=model_config)
+    model, config = load_model(
+        model_path,
+        lazy,
+        model_config=model_config,
+        moe_expert_offload=moe_expert_offload,
+        moe_expert_cache_mb=moe_expert_cache_mb,
+        moe_expert_prefetch=moe_expert_prefetch,
+        moe_expert_offload_layers=moe_expert_offload_layers,
+        n_disk_moe=n_disk_moe,
+    )
     if adapter_path is not None:
         model = load_adapters(model, adapter_path)
         model.eval()

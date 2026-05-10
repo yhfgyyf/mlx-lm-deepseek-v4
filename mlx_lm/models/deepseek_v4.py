@@ -14,6 +14,7 @@ from .base import BaseModelArgs, create_attention_mask, scaled_dot_product_atten
 from .cache import CacheList, PoolingCache, RotatingKVCache
 from .hyper_connection import HyperConnection, HyperHead, hc_expand
 from .mla import MultiLinear
+from .moe_disk_offload import DiskBackedSwitchGLU, get_moe_expert_store
 from .pipeline import PipelineMixin
 from .switch_layers import SwitchGLU
 
@@ -435,12 +436,31 @@ class DeepseekV4MoE(nn.Module):
         super().__init__()
         self.config = config
         self.gate = MoEGate(config, layer_idx)
-        self.switch_mlp = SwitchGLU(
-            config.hidden_size,
-            config.moe_intermediate_size,
-            config.n_routed_experts,
-            activation=LimitedSwiGLU(config.swiglu_limit),
-        )
+        expert_store = get_moe_expert_store()
+        offload_prefix = f"layers.{layer_idx}.ffn.experts"
+        if expert_store is not None and expert_store.has_tensor(
+            f"{offload_prefix}.w1.weight"
+        ):
+            self.switch_mlp = DiskBackedSwitchGLU(
+                config.hidden_size,
+                config.moe_intermediate_size,
+                config.n_routed_experts,
+                offload_prefix,
+                store=expert_store,
+                activation=LimitedSwiGLU(config.swiglu_limit),
+                projection_names={
+                    "gate_proj": "w1",
+                    "up_proj": "w3",
+                    "down_proj": "w2",
+                },
+            )
+        else:
+            self.switch_mlp = SwitchGLU(
+                config.hidden_size,
+                config.moe_intermediate_size,
+                config.n_routed_experts,
+                activation=LimitedSwiGLU(config.swiglu_limit),
+            )
         self.shared_experts = DeepseekV4MLP(
             config,
             intermediate_size=config.moe_intermediate_size * config.n_shared_experts,
@@ -1087,14 +1107,18 @@ class Model(nn.Module):
         weights = new_weights
 
         top_remap = {
-            "embed.weight": "model.embed_tokens.weight",
-            "norm.weight": "model.norm.weight",
-            "head.weight": "lm_head.weight",
+            "embed": "model.embed_tokens",
+            "norm": "model.norm",
+            "head": "lm_head",
             "hc_head_fn": "model.hc_head.fn",
             "hc_head_base": "model.hc_head.base",
             "hc_head_scale": "model.hc_head.scale",
         }
         for old, new in top_remap.items():
+            for suffix in ("weight", "scales", "biases"):
+                old_key = f"{old}.{suffix}"
+                if old_key in weights:
+                    weights[f"{new}.{suffix}"] = weights.pop(old_key)
             if old in weights:
                 weights[new] = weights.pop(old)
 
@@ -1128,6 +1152,19 @@ class Model(nn.Module):
                         weights[
                             f"model.layers.{layer_idx}.ffn.switch_mlp.{dst}.{suffix}"
                         ] = mx.stack(stacked)
+
+        # Stack split MultiLinear projections, e.g. wo_a.0.weight, wo_a.1.weight.
+        for layer_idx in range(n_layers):
+            prefix = f"model.layers.{layer_idx}.attn.wo_a"
+            for suffix in ("weight", "scales", "biases"):
+                key0 = f"{prefix}.0.{suffix}"
+                if key0 in weights:
+                    weights[f"{prefix}.{suffix}"] = mx.stack(
+                        [
+                            weights.pop(f"{prefix}.{group}.{suffix}")
+                            for group in range(self.args.o_groups)
+                        ]
+                    )
 
         # Reshape wo_a from nn.Linear (2D) to MultiLinear (3D) for all layers
         for layer_idx in range(n_layers):

@@ -16,6 +16,7 @@ from mlx_lm.server import (
     LRUPromptCache,
     Response,
     ResponseGenerator,
+    _public_model_name,
     _process_control_tokens,
 )
 from mlx_lm.utils import load
@@ -154,6 +155,23 @@ class TestProcessControlTokens(unittest.TestCase):
         self.assertEqual(
             [t.state for t in out],
             ["tool", "tool", "tool", "normal", "normal"],
+        )
+
+
+class TestServedModelName(unittest.TestCase):
+    def test_served_model_name_replaces_configured_model_aliases(self):
+        args = types.SimpleNamespace(
+            model="/tmp/local-model",
+            served_model_name="deepseek-v4-flash",
+        )
+
+        self.assertEqual(_public_model_name(args, "default_model"), "deepseek-v4-flash")
+        self.assertEqual(
+            _public_model_name(args, "/tmp/local-model"), "deepseek-v4-flash"
+        )
+        self.assertEqual(
+            _public_model_name(args, "other-model"),
+            "other-model",
         )
 
 
