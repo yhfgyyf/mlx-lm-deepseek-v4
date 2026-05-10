@@ -8,6 +8,49 @@ disk offload.
 The current branch includes upstream DeepSeek V4 support plus local changes for
 OpenAI-compatible serving, model-name aliases, and MoE expert offload sizing.
 
+## Installation
+
+This fork is packaged as `mlx-lm-deepseek-v4`. It installs the same Python
+module and CLI entry points as upstream MLX LM: `mlx_lm`, `mlx_lm.server`,
+`mlx_lm.generate`, and the rest of the `mlx_lm.*` commands.
+
+### Install From a Wheel
+
+Download or build the wheel, then install it into a Python environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install dist/mlx_lm_deepseek_v4-0.31.3-py3-none-any.whl
+```
+
+After installation, verify the CLI is available:
+
+```bash
+mlx_lm.server --help
+python -c "import mlx_lm; print(mlx_lm.__version__)"
+```
+
+### Build the Wheel Locally
+
+From the repository root:
+
+```bash
+python -m pip install --upgrade build
+python -m build --wheel
+```
+
+The wheel will be written to `dist/`.
+
+### Install From the Local Checkout
+
+For development:
+
+```bash
+python -m pip install -e .
+```
+
 ## What Changed
 
 - Applied upstream DeepSeek V4 model support.
@@ -64,7 +107,7 @@ If generation crashes with Metal OOM, lower it.
 ```bash
 export MODEL_DIR=/path/to/deepseek-ai-DeepSeek-V4-Flash-3bit
 
-PYTHONPATH=/path/to/mlx-lm python -m mlx_lm.server \
+mlx_lm.server \
   --host 127.0.0.1 \
   --port 8081 \
   --model "$MODEL_DIR" \

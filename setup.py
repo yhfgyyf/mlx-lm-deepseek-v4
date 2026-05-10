@@ -13,15 +13,15 @@ from _version import __version__
 MIN_MLX_VERSION = "0.31.2"
 
 setup(
-    name="mlx-lm",
+    name="mlx-lm-deepseek-v4",
     version=__version__,
-    description="LLMs with MLX and the Hugging Face Hub",
+    description="MLX LM fork with DeepSeek V4 and MoE expert disk offload",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     readme="README.md",
     author_email="mlx@group.apple.com",
-    author="MLX Contributors",
-    url="https://github.com/ml-explore/mlx-lm",
+    author="MLX Contributors and local fork contributors",
+    url="https://github.com/yhfgyyf/mlx-lm-deepseek-v4",
     license="MIT",
     install_requires=[
         f"mlx>={MIN_MLX_VERSION}; platform_system == 'Darwin'",
